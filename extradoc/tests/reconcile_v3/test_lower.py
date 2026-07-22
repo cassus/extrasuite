@@ -1690,6 +1690,62 @@ class TestMultiRunParagraphLowering:
 
 
 # ===========================================================================
+# Part 7: Word-atomic diffing
+# ===========================================================================
+
+
+class TestWordAtomicDiff:
+    """_word_diff_opcodes: whole-word replace ops, char-level only for whitespace."""
+
+    def test_single_word_replace_is_one_atomic_opcode(self) -> None:
+        """A one-word change stays a single word-level replace opcode.
+
+        Plain char-level ``difflib.SequenceMatcher`` (the pre-fix behavior)
+        finds a spurious shared 'r' between "brown" and "red" and fragments
+        this into three opcodes (delete "b", equal "r", replace "own"->"ed").
+        The word-atomic diff must instead treat "brown" and "red" as opaque
+        tokens and emit exactly one replace opcode for the whole word.
+        """
+        from extradoc.reconcile_v3.lower import _word_diff_opcodes
+
+        base = "The quick brown fox jumps over\n"
+        desired = "The quick red fox jumps over\n"
+
+        opcodes = _word_diff_opcodes(base, desired)
+        non_equal = [op for op in opcodes if op[0] != "equal"]
+
+        assert len(non_equal) == 1, f"Expected one atomic word replace, got {non_equal}"
+        tag, i1, i2, j1, j2 = non_equal[0]
+        assert tag == "replace"
+        assert base[i1:i2] == "brown"
+        assert desired[j1:j2] == "red"
+
+    def test_whitespace_only_change_falls_back_to_char_diff(self) -> None:
+        """Inserting a space inside a token stays a minimal char-level edit.
+
+        A naive word-level diff would treat "PARTI" and "PART I" as wholly
+        different tokens and replace the whole word. Since they're identical
+        once whitespace is stripped, the fallback must instead emit a
+        minimal single-character insert of the space.
+        """
+        from extradoc.reconcile_v3.lower import _word_diff_opcodes
+
+        base = "PARTI\n"
+        desired = "PART I\n"
+
+        opcodes = _word_diff_opcodes(base, desired)
+        non_equal = [op for op in opcodes if op[0] != "equal"]
+
+        assert len(non_equal) == 1, (
+            f"Expected one minimal char-level insert, got {non_equal}"
+        )
+        tag, i1, i2, j1, j2 = non_equal[0]
+        assert tag == "insert"
+        assert base[i1:i2] == ""
+        assert desired[j1:j2] == " "
+
+
+# ===========================================================================
 # Part 7: Footnote lowering
 # ===========================================================================
 

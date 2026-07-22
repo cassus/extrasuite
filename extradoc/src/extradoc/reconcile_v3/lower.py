@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import copy
 import difflib
+import re
 from itertools import groupby
 from typing import TYPE_CHECKING
 
@@ -2307,6 +2308,72 @@ def _delete_ops_skipping_opaque(
     return result
 
 
+_WORD_TOKEN_RE = re.compile(r"\w+|[^\w]")
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _tokenize_words(text: str) -> list[tuple[str, int, int]]:
+    """Split *text* into (token, start_cp, end_cp) triples.
+
+    Maximal runs of word characters (``\\w+``, includes digits/underscore)
+    form one token each; every other character (whitespace, punctuation) is
+    its own single-character token.  Offsets are code-point-based, matching
+    ``difflib.SequenceMatcher`` output.
+    """
+    return [(m.group(0), m.start(), m.end()) for m in _WORD_TOKEN_RE.finditer(text)]
+
+
+def _word_diff_opcodes(
+    base_body: str, desired_body: str
+) -> list[tuple[str, int, int, int, int]]:
+    """Word-atomic diff with a char-level fallback for whitespace-only edits.
+
+    Diffing at word-token granularity keeps multi-word inserts/deletes as
+    single readable chunks (no char-level fragment-soup in the Docs
+    Suggestions UI). But a pure word-level diff would replace an entire
+    token when only whitespace was inserted/removed inside it (e.g.
+    "PARTI" -> "PART I"), destroying the fine-grained single-space edits
+    downstream code (and callers) rely on. So: for any non-equal opcode
+    whose base/desired chunks are identical once whitespace is stripped,
+    fall back to a char-level sub-diff of just that chunk.
+    """
+    base_tokens = _tokenize_words(base_body)
+    desired_tokens = _tokenize_words(desired_body)
+    base_tok_strs = [t[0] for t in base_tokens]
+    desired_tok_strs = [t[0] for t in desired_tokens]
+
+    matcher = difflib.SequenceMatcher(
+        None, base_tok_strs, desired_tok_strs, autojunk=False
+    )
+
+    result: list[tuple[str, int, int, int, int]] = []
+    for tag, ti1, ti2, tj1, tj2 in matcher.get_opcodes():
+        i1 = base_tokens[ti1][1] if ti1 < len(base_tokens) else len(base_body)
+        i2 = base_tokens[ti2 - 1][2] if ti2 > ti1 else i1
+        j1 = desired_tokens[tj1][1] if tj1 < len(desired_tokens) else len(desired_body)
+        j2 = desired_tokens[tj2 - 1][2] if tj2 > tj1 else j1
+
+        if tag == "equal":
+            result.append((tag, i1, i2, j1, j2))
+            continue
+
+        base_chunk = base_body[i1:i2]
+        desired_chunk = desired_body[j1:j2]
+        if _WHITESPACE_RE.sub("", base_chunk) == _WHITESPACE_RE.sub("", desired_chunk):
+            # Whitespace-only rearrangement: refine at char level so the
+            # edit stays minimal (e.g. a single inserted/removed space).
+            sub_matcher = difflib.SequenceMatcher(
+                None, base_chunk, desired_chunk, autojunk=False
+            )
+            for stag, si1, si2, sj1, sj2 in sub_matcher.get_opcodes():
+                result.append((stag, i1 + si1, i1 + si2, j1 + sj1, j1 + sj2))
+            continue
+
+        result.append((tag, i1, i2, j1, j2))
+
+    return result
+
+
 def _diff_paragraph_runs(
     *,
     base_para: Paragraph,
@@ -2360,9 +2427,8 @@ def _diff_paragraph_runs(
     # (emoji, mathematical bold, etc.) are 1 code point but 2 UTF-16 units.
     base_cp_to_utf16 = _build_cp_to_utf16(base_body)
 
-    # Compute character-level diff
-    matcher = difflib.SequenceMatcher(None, base_body, desired_body, autojunk=False)
-    opcodes = matcher.get_opcodes()
+    # Compute word-atomic diff (char-level fallback for whitespace-only edits).
+    opcodes = _word_diff_opcodes(base_body, desired_body)
 
     # Collect pending ops as (abs_start, abs_end, kind, extra)
     # kind ∈ {"delete", "insert", "update_style", "replace"}
