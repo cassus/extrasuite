@@ -967,8 +967,12 @@ def align_content(
         prefix_alignment = _dp_align(prefix_base, prefix_desired)
 
     # Table-flank pinning: force the paragraphs immediately adjacent to each
-    # matched table pair to be matched (see module docstring).
-    prefix_alignment = _pin_table_flanks(prefix_alignment, prefix_base, prefix_desired)
+    # matched table pair to be matched (see module docstring). ``pre_pins``
+    # are threaded through so flank pins can never override an unambiguous
+    # exact-text anchor established above.
+    prefix_alignment = _pin_table_flanks(
+        prefix_alignment, prefix_base, prefix_desired, pre_pins
+    )
 
     # Positional fallback: promote unmatched same-kind elements in 1:1 gaps
     prefix_alignment = _positional_fallback(
@@ -1021,6 +1025,7 @@ def _pin_table_flanks(
     alignment: ContentAlignment,
     base: list[ContentNode],
     desired: list[ContentNode],
+    pre_pins: list[tuple[int, int]] | None = None,
 ) -> ContentAlignment:
     """Post-process a DP alignment to enforce the table-flanking invariant.
 
@@ -1034,19 +1039,33 @@ def _pin_table_flanks(
     (the API rejects deletion of a table-adjacent paragraph) and
     unnecessary churn.
 
+    ``pre_pins`` are the unambiguous exact-text (and API-uncreatable-element)
+    anchors already established by ``_pre_pin_stable_anchors`` before the
+    main DP ran. They are strictly higher confidence than a table-flank
+    guess and must never be clobbered by one: a flank pin is only a
+    heuristic ("the paragraph next to a table is *probably* the same
+    structural slot"), whereas a pre-pin is a proven unique correspondence.
+    They are folded into the same anchor set used by the existing
+    conflict-resolution loop below, at top priority — conflicts are always
+    resolved by dropping the contributing *table pair* (and its flanks),
+    never a pre-pin.
+
     This function:
 
     1. Collects the existing table pairs from the DP alignment.
     2. For each pair, forces pins on the pre- and post-flank paragraphs
        (when in range and both paragraphs).
-    3. Resolves conflicts (pins disagreeing on the same base or desired
-       index) by dropping the lower-similarity table pair.
-    4. Ensures anchors are monotonic in both base and desired indices.
-    5. Re-runs the DP on each gap between consecutive anchors when an
+    3. Adds the (immovable) ``pre_pins`` to the anchor set.
+    4. Resolves conflicts (pins disagreeing on the same base or desired
+       index) by dropping the lower-similarity table pair — pre-pins are
+       never eligible for dropping.
+    5. Ensures anchors are monotonic in both base and desired indices.
+    6. Re-runs the DP on each gap between consecutive anchors when an
        existing match would straddle an anchor; otherwise keeps the
        existing gap matches.
-    6. Rebuilds the final alignment (matches + deletes + inserts + cost).
+    7. Rebuilds the final alignment (matches + deletes + inserts + cost).
     """
+    pre_pins = pre_pins or []
     # Fast path: no tables at all.
     table_pairs_all: list[tuple[int, int]] = [
         (m.base_idx, m.desired_idx)
@@ -1068,8 +1087,9 @@ def _pin_table_flanks(
     active_pairs: list[tuple[int, int]] = list(table_pairs_all)
     # Bounded by O(#tables) iterations.
     for _ in range(len(table_pairs_all) + 1):
-        # Compute anchors = table_pairs union flank_pins.
-        anchors_set: set[tuple[int, int]] = set()
+        # Compute anchors = pre_pins (immovable) union table_pairs union
+        # flank_pins.
+        anchors_set: set[tuple[int, int]] = set(pre_pins)
         for bi, di in active_pairs:
             anchors_set.add((bi, di))
             # Pre-flank
@@ -1165,7 +1185,7 @@ def _pin_table_flanks(
         return alignment
 
     # Final anchors, sorted by base index (monotonic in both axes by construction).
-    anchors_set = set()
+    anchors_set = set(pre_pins)
     for bi, di in active_pairs:
         anchors_set.add((bi, di))
         if (

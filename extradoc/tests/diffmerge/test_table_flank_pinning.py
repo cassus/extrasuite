@@ -239,7 +239,13 @@ def test_adjacent_tables_sharing_flank() -> None:
 
 
 def test_unequal_table_counts_one_deleted() -> None:
-    """Base has 2 tables, desired has 1 — only the remaining pair gets pinned."""
+    """Base has 2 tables, desired has 1 — only the remaining pair gets pinned.
+
+    "Outro" is exact-text-unique in both base and desired, so the exact-text
+    pre-pin (base idx 4 <-> desired idx 2) wins over the table-flank
+    heuristic that would otherwise force "Middle" (base idx 2, unrelated
+    text) onto "Outro" — the pre-pin gives a strictly better alignment.
+    """
     base_els = [
         make_para_el("Intro"),
         make_table_el([["keep1", "a"]]),
@@ -258,17 +264,22 @@ def test_unequal_table_counts_one_deleted() -> None:
     # The preserved table pair and its flanks should match.
     _assert_matched(a, 0, 0)  # Intro
     _assert_matched(a, 1, 1)  # table keep1
-    # Middle+dropped table+Outro in base must resolve to Outro in desired.
-    # The post-flank of kept table in base is "Middle"; the post-flank in
-    # desired is "Outro". These will be pinned together (flank invariant).
-    _assert_matched(a, 2, 2)
-    # Dropped table (base idx 3) and base idx 4 (Outro) must be deleted.
+    # "Outro" (base idx 4) exact-matches "Outro" (desired idx 2) directly.
+    _assert_matched(a, 4, 2)
+    # "Middle" (base idx 2) and the dropped table (base idx 3) are deleted.
+    assert 2 in set(a.base_deletes)
     assert 3 in set(a.base_deletes)
-    assert 4 in set(a.base_deletes)
 
 
 def test_unequal_table_counts_one_inserted() -> None:
-    """Base has 1 table, desired has 2 — only existing pair is pinned."""
+    """Base has 1 table, desired has 2 — only existing pair is pinned.
+
+    "Outro" is exact-text-unique in both base and desired (at desired idx 4,
+    after the newly-inserted heading + table), so the exact-text pre-pin
+    wins over the table-flank heuristic that would otherwise force it onto
+    the new "Middle new" heading right after the kept table. The new
+    heading + table are simply inserts; "Outro" is left untouched.
+    """
     base_els = [
         make_para_el("Intro"),
         make_table_el([["keep", "a"]]),
@@ -286,8 +297,10 @@ def test_unequal_table_counts_one_inserted() -> None:
     a = align_content(_nodes(base_els), _nodes(desired_els))
     _assert_matched(a, 0, 0)
     _assert_matched(a, 1, 1)
-    # Post-flank of the kept table pins (2, 2).
-    _assert_matched(a, 2, 2)
+    # "Outro" (base idx 2) exact-matches "Outro" (desired idx 4) directly.
+    _assert_matched(a, 2, 4)
+    assert 2 in set(a.desired_inserts)  # "Middle new" heading
+    assert 3 in set(a.desired_inserts)  # new table
 
 
 def test_table_at_start_no_preflank() -> None:
@@ -400,6 +413,48 @@ def test_no_tables_at_all_noop() -> None:
     _assert_matched(a, 0, 0)
     _assert_matched(a, 1, 1)
     _assert_matched(a, 2, 2)
+
+
+def test_flank_pin_never_overrides_exact_text_pre_pin() -> None:
+    """A table-flank pin must never clobber an unambiguous exact-text pin.
+
+    Regression test for the "III. FEJEZET" bug: a table's row count changes
+    AND a brand-new heading is inserted right after the table in `desired`,
+    while the *original* post-flank heading (unchanged text) is still present
+    further downstream in `desired`, unambiguously pre-pinned there by
+    ``_pre_pin_stable_anchors``. The naive table-flank post-processor used to
+    force the post-flank paragraph to match the new adjacent heading,
+    clobbering the correct far-away exact-text match.
+    """
+    base_els = [
+        make_para_el("Opening paragraph"),
+        make_table_el([["x", "y"], ["z", "w"], ["p", "q"]]),
+        make_para_el("STABLE HEADING TEXT UNIQUE"),
+        make_terminal_para(),
+    ]
+    desired_els = [
+        make_para_el("Opening paragraph"),
+        make_table_el(
+            [["x", "y"], ["z", "w"], ["p", "q"], ["new1", "new2"], ["new3", "new4"]]
+        ),
+        make_para_el("BRAND NEW HEADING INSERTED"),
+        make_para_el("Some other stable filler text"),
+        make_para_el("STABLE HEADING TEXT UNIQUE"),
+        make_terminal_para(),
+    ]
+    a = align_content(_nodes(base_els), _nodes(desired_els))
+    # The exact-text pre-pin must win: base idx 2 ("STABLE HEADING TEXT
+    # UNIQUE") must match desired idx 4, NOT be clobbered into desired idx 2
+    # (the new heading) by the table-flank heuristic.
+    _assert_matched(a, 2, 4)
+    _assert_not_deleted(a, 2)
+    # The new heading must be a genuine insert, not a forced match.
+    assert 2 in set(a.desired_inserts), (
+        "desired idx 2 (brand new heading) should be an insert, "
+        "not force-matched to base idx 2"
+    )
+    # The table pair itself should still be pinned.
+    _assert_matched(a, 1, 1)
 
 
 def test_three_tables_all_flanks_rewritten() -> None:
