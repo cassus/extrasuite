@@ -1686,15 +1686,25 @@ def _final_doc_size_from_reqs(reqs: list[Request]) -> int:
 
 def _batch_insert_size_from_reqs(reqs: list[Request]) -> int:
     """Compute the net UTF-16 size added to the story segment by this element's
-    requests, measured as the sum of each insert request's own contribution.
+    requests — i.e. how far each insert shifts the content that follows it.
 
-    Differs from ``_final_doc_size_from_reqs`` in how ``insertTable`` is
-    counted: here we count only the table skeleton as the API delta
-    (``1 + rows * (1 + cols * 2)``), matching the request-level accounting
-    used by the matched-element post_insert_shift.  We do NOT add the
-    pre-paragraph \\n or trailing carrier paragraph here — those are either
-    absorbed into the existing paragraph structure or emitted as separate
-    ``insertText`` requests already counted above.
+    This value feeds ``post_insert_shift`` for matched-element updates, so it
+    MUST equal the true API footprint of the requests. An ``insertTable`` shifts
+    subsequent content by the table span PLUS exactly one ``\\n`` — never two:
+
+      * table span   → ``2 + rows * (1 + cols * 2)``
+          (table opener 1 + terminal 1 + rows*(row opener 1 + cols*cell 2))
+      * one ``\\n``   → 1
+    giving ``3 + rows*(1 + cols*2)``, which matches the per-request accounting
+    in ``_final_doc_size_from_reqs`` (``2 + rows*(1+cols*2) + 1``).
+
+    The single ``\\n`` is the pre-split newline when the table is inserted mid-
+    document (the following existing paragraph acts as the table's carrier), or
+    the trailing carrier newline when it is inserted at end-of-segment — never
+    both. The earlier ``4 + rows*(1+cols*2)`` over-counted the mid-document case
+    by 1, sliding every later matched-update op one char off. The offline mock
+    hid this because ``mock/table_ops`` also emitted both newlines; only a real
+    SUGGEST push + accepted-text verify exposes the disagreement.
     """
     total = 0
     for req in reqs:
@@ -1704,7 +1714,8 @@ def _batch_insert_size_from_reqs(reqs: list[Request]) -> int:
             it = req.insert_table
             rows = it.rows or 0
             cols = it.columns or 0
-            total += 1 + rows * (1 + cols * 2)
+            # table span (2 + rows*(1+cols*2)) + exactly one \n
+            total += 3 + rows * (1 + cols * 2)
         elif req.insert_page_break is not None:
             total += 2
         elif req.insert_section_break is not None:

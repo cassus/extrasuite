@@ -164,8 +164,14 @@ def _simulate_requests_and_find_stale_deletes(
                 idx = ins.location.index
                 rows = ins.rows or 0
                 cols = ins.columns or 0
-                # Table skeleton: 1 + rows * (1 + cols * 2) UTF-16 units.
-                delta = 1 + rows * (1 + cols * 2)
+                # Full body-segment insertTable footprint — how far it shifts
+                # subsequent content — matching the real API (controlled probe)
+                # and ``_batch_insert_size_from_reqs``: table span
+                # (2 + rows*(1+cols*2)) + exactly ONE \n. The API adds a single
+                # newline (the pre-split \n mid-doc, or the trailing carrier at
+                # end-of-segment) — never both, so the shift is span+1, not
+                # span+2.
+                delta = 3 + rows * (1 + cols * 2)
                 if idx > len(origins):
                     violations.append(
                         f"req[{req_idx}] insertTable: index={idx} > "

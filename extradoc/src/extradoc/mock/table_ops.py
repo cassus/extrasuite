@@ -98,17 +98,29 @@ def handle_insert_table(
 
     # Step 5: Insert table into content array
     inject_content.insert(inject_idx, table_elem)
+    # A table is never the last element of a body segment, so the API emits a
+    # trailing carrier paragraph only when nothing (or another table) follows.
+    # When the step-1 split already left a following paragraph (the common mid-
+    # document insert), that paragraph IS the carrier; emitting another would
+    # over-count the footprint by one newline. See
+    # ``reconcile_v3.lower._batch_insert_size_from_reqs``.
     if segment_id is None:
-        inject_content.insert(
-            inject_idx + 1,
-            _build_table_carrier_paragraph(
-                paragraph_style=_resolve_preceding_paragraph_style(
-                    inject_idx,
-                    inject_content,
-                ),
-                text_style=inherited_text_style,
-            ),
+        following = (
+            inject_content[inject_idx + 1]
+            if inject_idx + 1 < len(inject_content)
+            else None
         )
+        if following is None or following.get("table") is not None:
+            inject_content.insert(
+                inject_idx + 1,
+                _build_table_carrier_paragraph(
+                    paragraph_style=_resolve_preceding_paragraph_style(
+                        inject_idx,
+                        inject_content,
+                    ),
+                    text_style=inherited_text_style,
+                ),
+            )
 
     # No index shifting — reindex handles it
     return {}
